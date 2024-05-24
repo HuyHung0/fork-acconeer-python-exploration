@@ -9,7 +9,8 @@ import attrs
 import numpy as np
 import numpy.typing as npt
 from attributes_doc import attributes_doc
-from scipy.signal import butter
+from scipy.signal import butter, find_peaks, filtfilt, lfilter
+import matplotlib.pyplot as plt
 
 from acconeer.exptool import a121
 from acconeer.exptool._core.class_creation.attrs import attrs_ndarray_isclose
@@ -52,6 +53,12 @@ class BreathingProcessorConfig(AlgoProcessorConfigBase):
     highest_breathing_rate: float = attrs.field(default=60.0)
     """Highest anticipated breathing rate (breaths per minute)."""
 
+    lowest_heart_rate: float = attrs.field(default=35)
+    """Lowest anticipated heart rate (beats per minute)."""
+
+    highest_breathing_rate: float = attrs.field(default=160)
+    """Highest anticipated heart rate (beats per minute)."""
+
     time_series_length_s: float = attrs.field(default=20.0)
     """Time series length (s)."""
 
@@ -80,12 +87,17 @@ class BreathingProcessorExtraResult:
     time_vector: npt.NDArray[np.float_] = attrs.field(eq=attrs_ndarray_isclose)
     breathing_rate_history: npt.NDArray[np.float_] = attrs.field(eq=attrs_ndarray_isclose)
     all_breathing_rate_history: npt.NDArray[np.float_] = attrs.field(eq=attrs_ndarray_isclose)
+    heart_rate_history: npt.NDArray[np.float_] = attrs.field(eq=attrs_ndarray_isclose)
+    all_heart_rate_history: npt.NDArray[np.float_] = attrs.field(eq=attrs_ndarray_isclose)
 
 
 @attrs.mutable(kw_only=True)
 class BreathingProcessorResult:
     breathing_rate: Optional[float] = attrs.field(default=None)
     """Estimated breathing rate. Breaths per minute."""
+
+    heart_rate: Optional[float] = attrs.field(default=None)
+    """Estimated heart rate. Beats per minute."""
 
     extra_result: BreathingProcessorExtraResult
     """Extra result, only used for visualization."""
@@ -107,6 +119,8 @@ class BreathingProcessor(ProcessorBase[BreathingProcessorResult]):
     breathing_motion_buffer: npt.NDArray[np.float_]
     breathing_rate_history: npt.NDArray[np.float_]
     all_breathing_rate_history: npt.NDArray[np.float_]
+    heart_rate_history: npt.NDArray[np.float_]
+    all_heart_rate_history: npt.NDArray[np.float_]
 
     start_time: float
     init_counter: int
@@ -224,17 +238,49 @@ class BreathingProcessor(ProcessorBase[BreathingProcessorResult]):
             self.init_counter += 1
             estimated_breathing_rate = None
 
+        heart_rate_mask = (self.frequencies > 1) & (self.frequencies < 1.8)
+        heart_rate_psd = psd_weighted[heart_rate_mask]#psd_weighted[heart_rate_mask]
+        peaks, _ = find_peaks(heart_rate_psd)
+
+        if len(peaks) > 0 and self.time_series_length < self.init_counter:
+            # Use peak_interpolation to refine the primary heart rate frequency detection
+            max_peak_index = peaks[np.argmax(heart_rate_psd[peaks])]
+            if max_peak_index <= 0 or max_peak_index >= len(heart_rate_psd) - 1:  # Edge case
+                primary_heart_rate_freq = self.frequencies[heart_rate_mask][max_peak_index]
+            else:              
+                refined_freq_offset = self._peak_interpolation(
+                    heart_rate_psd[max_peak_index - 1 : max_peak_index + 2],
+                    self.frequencies[heart_rate_mask][max_peak_index - 1 : max_peak_index + 2],
+                )
+            primary_heart_rate_freq = refined_freq_offset * self.SECONDS_IN_MINUTE
+            '''
+            if not np.all(np.isnan(self.heart_rate_history)):
+                avg_prev_heart_rate = np.mean(self.heart_rate_history)
+                if abs(primary_heart_rate_freq - avg_prev_heart_rate) > 2*np.std(self.heart_rate_history)/np.sqrt(len(self.heart_rate_history)):  # CI 95% for the mean (t-student)
+                    primary_heart_rate_freq = avg_prev_heart_rate
+            '''
+            print('heart rate:', primary_heart_rate_freq)
+        else:
+            primary_heart_rate_freq = None
+
         # Shift breathing rate history and add latest estimate.
         self.all_breathing_rate_history = np.roll(self.all_breathing_rate_history, shift=-1)
         self.all_breathing_rate_history[-1] = estimated_breathing_rate
         self.breathing_rate_history = np.roll(self.breathing_rate_history, shift=-1)
 
+        # Shift heart rate history and add latest estimate.
+        self.all_heart_rate_history = np.roll(self.all_heart_rate_history, shift=-1)
+        self.all_heart_rate_history[-1] = primary_heart_rate_freq
+        self.heart_rate_history = np.roll(self.heart_rate_history, shift=-1)
+
         # Report breathing rate if enough time has elapsed since last estimate.
         if self.time_series_length - self.analysis_overlap <= self.point_counter:
             self.breathing_rate_history[-1] = estimated_breathing_rate
+            self.heart_rate_history[-1] = primary_heart_rate_freq
             self.point_counter = 0
         else:
             self.breathing_rate_history[-1] = np.nan
+            self.heart_rate_history[-1] = np.nan
             self.point_counter += 1
 
         # Prepare extra result, used for plotting.
@@ -245,10 +291,12 @@ class BreathingProcessor(ProcessorBase[BreathingProcessorResult]):
             time_vector=self.time_vector,
             all_breathing_rate_history=self.all_breathing_rate_history,
             breathing_rate_history=self.breathing_rate_history,
+            heart_rate_history=self.heart_rate_history,
+            all_heart_rate_history=self.all_heart_rate_history,
         )
 
         return BreathingProcessorResult(
-            breathing_rate=estimated_breathing_rate, extra_result=extra_result
+            breathing_rate=estimated_breathing_rate, heart_rate=primary_heart_rate_freq, extra_result=extra_result
         )
 
     def reinitialize_processor(self, start_point: int, end_point: int) -> None:
@@ -286,6 +334,12 @@ class BreathingProcessor(ProcessorBase[BreathingProcessorResult]):
             shape=int(self.frame_rate * self.HISTORY_S), fill_value=np.nan
         )
         self.all_breathing_rate_history = np.full(
+            shape=int(self.frame_rate * self.HISTORY_S), fill_value=np.nan
+        )
+        self.heart_rate_history = np.full(
+            shape=int(self.frame_rate * self.HISTORY_S), fill_value=np.nan
+        )
+        self.all_heart_rate_history = np.full(
             shape=int(self.frame_rate * self.HISTORY_S), fill_value=np.nan
         )
 
@@ -475,6 +529,7 @@ class Processor(ProcessorBase[ProcessorResult]):
             self.base_presence_distance = None
 
         elif self.app_state == AppState.DETERMINE_DISTANCE_ESTIMATE:
+
             if self.app_state != self.prev_app_state:
                 self.distance_determination_counter = 0
             else:

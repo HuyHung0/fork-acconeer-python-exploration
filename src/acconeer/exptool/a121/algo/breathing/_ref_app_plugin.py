@@ -86,6 +86,7 @@ class SetupMessage(GeneralMessage):
 
 
 class BackendPlugin(A121BackendPluginBase[SharedState]):
+
     PLUGIN_PRESETS: Mapping[int, Callable[[], RefAppConfig]] = {
         PluginPresetId.SITTING.value: lambda: get_sitting_config(),
         PluginPresetId.INFANT.value: lambda: get_infant_config(),
@@ -172,11 +173,14 @@ class BackendPlugin(A121BackendPluginBase[SharedState]):
 
 
 class PlotPlugin(PgPlotPlugin):
+
     displayed_breathing_rate: Optional[str]
+    displayed_heart_rate: Optional[str]
 
     def __init__(self, app_model: AppModel) -> None:
         super().__init__(app_model=app_model)
         self.displayed_breathing_rate = None
+        self.displayed_heart_rate = None
         self._plot_job: Optional[RefAppResult] = None
         self._is_setup = False
 
@@ -310,7 +314,7 @@ class PlotPlugin(PgPlotPlugin):
         self.breathing_rate_plot.setMenuEnabled(False)
         self.breathing_rate_plot.showGrid(x=True, y=True)
         self.breathing_rate_plot.addLegend()
-        self.breathing_rate_plot.setLabel("left", "Breaths per minute")
+        self.breathing_rate_plot.setLabel("left", "Breaths per min")
         self.breathing_rate_plot.setLabel("bottom", "Time (s)")
         self.breathing_rate_plot.addItem(pg.PlotDataItem())
         self.breathing_rate_curves = []
@@ -336,6 +340,38 @@ class PlotPlugin(PgPlotPlugin):
         self.breathing_rate_text_item.setFont(font)
         self.breathing_rate_text_item.hide()
         self.breathing_rate_plot.addItem(self.breathing_rate_text_item)
+
+        # Heart rate plot.
+        self.heart_rate_plot = win.addPlot(row=4, col=0)
+        self.heart_rate_plot.setMenuEnabled(False)
+        self.heart_rate_plot.showGrid(x=True, y=True)
+        self.heart_rate_plot.addLegend()
+        self.heart_rate_plot.setLabel("left", "Heartbeats per min")
+        self.heart_rate_plot.setLabel("bottom", "Time (s)")
+        self.heart_rate_plot.addItem(pg.PlotDataItem())
+        self.heart_rate_curves = []
+        self.heart_rate_curves.append(self.heart_rate_plot.plot(**self.blue))
+        self.heart_rate_curves.append(
+            self.heart_rate_plot.plot(**dict(pen=None, **symbol_dot_kw))
+        )
+        self.smooth_heart_rate = et.utils.SmoothLimits()
+
+        self.heart_rate_plot_legend = pg.LegendItem(offset=(0.0, 0.5))
+        self.heart_rate_plot_legend.setParentItem(self.heart_rate_plot)
+        self.heart_rate_plot_legend.addItem(self.heart_rate_curves[0], "Heartbeat rate")
+        self.heart_rate_plot_legend.addItem(
+            self.heart_rate_curves[1], "Heartbeat rate(embedded output)"
+        )
+        self.heart_rate_plot_legend.hide()
+
+        self.heart_rate_text_item = pg.TextItem(
+            fill=pg.mkColor(0xFF, 0x7F, 0x0E, 200),
+            anchor=(0.5, 0),
+            color=pg.mkColor(0xFF, 0xFF, 0xFF, 200),
+        )
+        self.heart_rate_text_item.setFont(font)
+        self.heart_rate_text_item.hide()
+        self.heart_rate_plot.addItem(self.breathing_rate_text_item)
 
     def draw_plot_job(self, *, ref_app_result: RefAppResult) -> None:
         app_state = ref_app_result.app_state
@@ -386,6 +422,8 @@ class PlotPlugin(PgPlotPlugin):
             time_vector = breathing_result.time_vector
             all_breathing_rate_history = breathing_result.all_breathing_rate_history
             breathing_rate_history = breathing_result.breathing_rate_history
+            all_heart_rate_history = breathing_result.all_heart_rate_history
+            heart_rate_history = breathing_result.heart_rate_history
 
             self.time_series_curve.setData(
                 time_vector[-breathing_motion.shape[0] :], breathing_motion
@@ -408,12 +446,25 @@ class PlotPlugin(PgPlotPlugin):
 
                 self.breathing_rate_plot_legend.show()
 
+            if not np.all(np.isnan(all_heart_rate_history)):
+                self.heart_rate_curves[0].setData(time_vector, all_heart_rate_history)
+                lims = self.smooth_heart_rate.update(all_heart_rate_history) #check. missing something?
+                self.heart_rate_plot.setYRange(50, 120)
+                self.heart_rate_plot_legend.show()
+
             if not np.all(np.isnan(breathing_rate_history)):
                 self.breathing_rate_curves[1].setData(time_vector, breathing_rate_history)
+
+            if not np.all(np.isnan(heart_rate_history)):
+                self.heart_rate_curves[1].setData(time_vector, heart_rate_history)
 
             if not np.isnan(breathing_rate_history[-1]):
                 self.displayed_breathing_rate = "{:.1f}".format(breathing_rate_history[-1])
                 self.breathing_rate_text_item.show()
+
+            if not np.isnan(heart_rate_history[-1]):
+                self.displayed_heart_rate = "{:.1f}".format(heart_rate_history[-1]) #check
+                self.heart_rate_text_item.show()
 
         else:
             self.time_series_plot.setYRange(0, 1)
@@ -423,6 +474,10 @@ class PlotPlugin(PgPlotPlugin):
             self.breathing_rate_curves[0].setData([], [])
             self.breathing_rate_curves[1].setData([], [])
             self.displayed_breathing_rate = None
+            self.heart_rate_curves[0].setData([], [])
+            self.heart_rate_curves[1].setData([], [])
+            self.displayed_heart_rate = None
+            self.heart_rate_text_item.hide()
             self.breathing_rate_text_item.hide()
 
         # Set text in text boxes according to app state.
@@ -480,6 +535,14 @@ class PlotPlugin(PgPlotPlugin):
 
             self.breathing_rate_text_item.setPos(text_x_pos, text_y_pos)
             self.breathing_rate_text_item.setHtml(self.displayed_breathing_rate + " bpm")
+
+        if self.displayed_heart_rate is not None:
+            text_y_pos = self.heart_rate_plot.getAxis("left").range[1] * 0.95
+            text_x_pos = time_vector[0]
+
+            self.heart_rate_text_item.setPos(text_x_pos, text_y_pos)
+            self.heart_rate_text_item.setHtml(self.displayed_heart_rate + " bpm")
+        
 
 
 class ViewPlugin(A121ViewPluginBase):
@@ -812,7 +875,6 @@ BREATHING_PLUGIN = PluginSpec(
     generation=PluginGeneration.A121,
     key="breathing",
     title="Breathing",
-    docs_link="https://docs.acconeer.com/en/latest/exploration_tool/algo/a121/ref_apps/breathing.html",
     description="Detect breathing rate.",
     family=PluginFamily.REF_APP,
     presets=[
