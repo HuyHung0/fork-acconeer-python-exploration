@@ -56,7 +56,7 @@ class BreathingProcessorConfig(AlgoProcessorConfigBase):
     lowest_heart_rate: float = attrs.field(default=35)
     """Lowest anticipated heart rate (beats per minute)."""
 
-    highest_breathing_rate: float = attrs.field(default=160)
+    highest_heart_rate: float = attrs.field(default=160)
     """Highest anticipated heart rate (beats per minute)."""
 
     time_series_length_s: float = attrs.field(default=20.0)
