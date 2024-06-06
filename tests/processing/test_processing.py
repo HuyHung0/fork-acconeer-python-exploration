@@ -16,6 +16,7 @@ from .a121 import (
     breathing_test,
     data_files,
     distance_test,
+    hand_motion_test,
     parking_test,
     presence_test,
     smart_presence_test,
@@ -125,6 +126,11 @@ def input_path(resource_name: str) -> Path:
         (
             distance_test.distance_detector,
             t.List[distance_test.ResultSlice],
+            "input-distance-detector-5_to_200_cm_p1_close_range_cancellation_disabled.h5",
+        ),
+        (
+            distance_test.distance_detector,
+            t.List[distance_test.ResultSlice],
             "corner-reflector.h5",
         ),
         (
@@ -205,7 +211,7 @@ def input_path(resource_name: str) -> Path:
         (
             vibration_test.vibration_controller,
             t.List[vibration_test.ResultSlice],
-            "vibration_cont_sweep.h5",
+            "vibration_low_frequency.h5",
         ),
         (
             vibration_test.vibration_controller,
@@ -236,6 +242,16 @@ def input_path(resource_name: str) -> Path:
             waste_level_test.waste_level_processor,
             t.List[waste_level_test.ResultSlice],
             "input-waste-level-missing-level.h5",
+        ),
+        (
+            hand_motion_test.hand_motion_app,
+            t.List[hand_motion_test.ResultSlice],
+            "hand-motion-default.h5",
+        ),
+        (
+            hand_motion_test.hand_motion_app,
+            t.List[hand_motion_test.ResultSlice],
+            "hand-motion-no-presence.h5",
         ),
     ],
 )

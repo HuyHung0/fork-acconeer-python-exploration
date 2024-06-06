@@ -11,8 +11,7 @@ import h5py
 import numpy as np
 import numpy.typing as npt
 
-from acconeer.exptool import a121
-from acconeer.exptool.a121._h5_utils import _create_h5_string_dataset
+from acconeer.exptool import a121, opser
 from acconeer.exptool.a121.algo import (
     APPROX_BASE_STEP_LENGTH_M,
     ENVELOPE_FWHM_M,
@@ -94,6 +93,9 @@ class ExampleAppConfig(AlgoConfigBase):
         return validation_results
 
 
+opser.register_json_presentable(ExampleAppConfig)
+
+
 @attrs.frozen(kw_only=True)
 class ExtraResult:
     history: npt.NDArray[np.float_] = attrs.field()
@@ -123,7 +125,7 @@ class ExampleApp(Controller[ExampleAppConfig, ExampleAppResult]):
     :param example_app_config: Hand motion detection configuration
     """
 
-    processors: list[Processor]
+    processor: Processor
     HISTORY_LENGTH_S = 10.0
 
     def __init__(
@@ -138,7 +140,7 @@ class ExampleApp(Controller[ExampleAppConfig, ExampleAppResult]):
         self.config = example_app_config
 
         self.detection_retention_duration = int(
-            example_app_config.detection_retention_duration * example_app_config.frame_rate
+            round(example_app_config.detection_retention_duration * example_app_config.frame_rate)
         )
 
         self.started = False
@@ -160,8 +162,11 @@ class ExampleApp(Controller[ExampleAppConfig, ExampleAppResult]):
         metadata = self.client.setup_session(self.session_config)
         assert isinstance(metadata, a121.Metadata)
 
-        self.processors = self._create_processors(
-            sensor_config=sensor_config, example_app_config=self.config, metadata=metadata
+        self.processor = Processor(
+            sensor_config=sensor_config,
+            processor_config=self._get_processor_config(self.config),
+            context=ProcessorContext(estimated_frame_rate=self.config.frame_rate),
+            metadata=metadata,
         )
 
         if _algo_group is None and isinstance(recorder, a121.H5Recorder):
@@ -191,31 +196,20 @@ class ExampleApp(Controller[ExampleAppConfig, ExampleAppResult]):
         result = self.client.get_next()
         assert isinstance(result, a121.Result)
 
-        assert self.processors is not None
-        processor_result = [processor.process(result) for processor in self.processors]
+        assert self.processor is not None
+        processor_result = self.processor.process(result)
 
         return self._process_processor_result(processor_result, self.config)
 
     def _process_processor_result(
-        self, results: list[ProcessorResult], config: ExampleAppConfig
+        self, result: ProcessorResult, config: ExampleAppConfig
     ) -> ExampleAppResult:
-        # Determine max presence score and if presence has been detected.
-        presence_detected = False
-        max_presence_scrore = results[0].inter_presence_score
-        for result in results:
-            if max_presence_scrore < result.inter_presence_score:
-                max_presence_scrore = result.inter_presence_score
-
-            if max_presence_scrore < result.intra_presence_score:
-                max_presence_scrore = result.intra_presence_score
-
-            if result.presence_detected:
-                presence_detected = True
+        max_presence_score = max(result.inter_presence_score, result.intra_presence_score)
 
         # Determine detections state.
         detection_state = DetectionState.NO_DETECTION
 
-        if presence_detected:
+        if result.presence_detected:
             self.has_detected = True
             self.update_index_at_detection = self.update_index
             detection_state = DetectionState.DETECTION
@@ -230,7 +224,7 @@ class ExampleApp(Controller[ExampleAppConfig, ExampleAppResult]):
 
         # Prepare extra result(used for plotting).
         self.history = np.roll(self.history, shift=-1, axis=0)
-        self.history[-1] = max_presence_scrore
+        self.history[-1] = max_presence_score
         extra_result = ExtraResult(
             history=self.history,
             history_time=self.history_time,
@@ -265,35 +259,6 @@ class ExampleApp(Controller[ExampleAppConfig, ExampleAppResult]):
 
         return recorder_result
 
-    def _create_processors(
-        self,
-        sensor_config: a121.SensorConfig,
-        example_app_config: ExampleAppConfig,
-        metadata: a121.Metadata,
-    ) -> list[Processor]:
-        processors = []
-        for subsweep_index, subsweep_config in enumerate(sensor_config.subsweeps):
-            processor_sensor_config = a121.SensorConfig(
-                start_point=subsweep_config.start_point,
-                num_points=subsweep_config.num_points,
-                step_length=subsweep_config.step_length,
-                profile=subsweep_config.profile,
-                frame_rate=sensor_config.frame_rate,
-                sweeps_per_frame=sensor_config.sweeps_per_frame,
-            )
-
-            processors.append(
-                Processor(
-                    sensor_config=processor_sensor_config,
-                    processor_config=self._get_processor_config(example_app_config),
-                    context=ProcessorContext(estimated_frame_rate=example_app_config.frame_rate),
-                    metadata=metadata,
-                    subsweep_indexes=[subsweep_index],
-                )
-            )
-
-        return processors
-
     @classmethod
     def _get_sensor_config(cls, config: ExampleAppConfig) -> a121.SensorConfig:
         """Convert example app config parameters to sensor config.
@@ -312,8 +277,14 @@ class ExampleApp(Controller[ExampleAppConfig, ExampleAppResult]):
         if ENVELOPE_FWHM_M[profile] < (config.sensor_to_water_distance - water_jet_half_width):
             subsweep_config = a121.SubsweepConfig()
             subsweep_config.start_point = int(
-                (config.sensor_to_water_distance - ENVELOPE_FWHM_M[profile] - water_jet_half_width)
-                / APPROX_BASE_STEP_LENGTH_M
+                round(
+                    (
+                        config.sensor_to_water_distance
+                        - ENVELOPE_FWHM_M[profile]
+                        - water_jet_half_width
+                    )
+                    / APPROX_BASE_STEP_LENGTH_M
+                )
             )
             subsweep_config.num_points = 1
             subsweep_config.step_length = step_length
@@ -330,12 +301,14 @@ class ExampleApp(Controller[ExampleAppConfig, ExampleAppResult]):
             start_m = (
                 config.sensor_to_water_distance + water_jet_half_width + ENVELOPE_FWHM_M[profile]
             )
-            start_point = int(start_m / APPROX_BASE_STEP_LENGTH_M)
+            start_point = int(round(start_m / APPROX_BASE_STEP_LENGTH_M))
             num_points = max(
                 1,
                 int(
-                    (config.measurement_range_end - start_m)
-                    / (step_length * APPROX_BASE_STEP_LENGTH_M)
+                    round(
+                        (config.measurement_range_end - start_m)
+                        / (step_length * APPROX_BASE_STEP_LENGTH_M)
+                    )
                 ),
             )
 
@@ -386,10 +359,11 @@ def _record_algo_data(
         data=sensor_id,
         track_times=False,
     )
-    _create_h5_string_dataset(algo_group, "example_app_config", config.to_json())
+    app_config_group = algo_group.create_group("example_app_config")
+    opser.serialize(config, app_config_group)
 
 
 def _load_algo_data(algo_group: h5py.Group) -> Tuple[int, ExampleAppConfig]:
     sensor_id = int(algo_group["sensor_id"][()])
-    config = ExampleAppConfig.from_json(algo_group["example_app_config"][()])
+    config = opser.deserialize(algo_group["example_app_config"], ExampleAppConfig)
     return sensor_id, config

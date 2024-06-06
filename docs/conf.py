@@ -5,9 +5,18 @@ project = "acconeer-python-exploration"
 copyright = "2019-2024, Acconeer AB"
 author = "Acconeer AB"
 html_title = "Acconeer docs"
+language = "en"
 
-# version = ""  # The short X.Y version
-# release = ""  # The full version, including alpha/beta/rc tags
+master_doc = "index"
+source_suffix = ".rst"
+
+exclude_patterns = [
+    "_build",
+    "Thumbs.db",
+    ".DS_Store",
+    "README.md",
+    "how_to_docs.rst",
+]
 
 extensions = [
     "sphinx.ext.mathjax",
@@ -18,24 +27,26 @@ extensions = [
     "myst_parser",
     "sphinxext.rediraffe",
     "notfound.extension",
+    "sphinx_tabs.tabs",
+    "sphinxcontrib.youtube",
+    "sphinxcontrib.spelling",
 ]
 
 suppress_warnings = [
     "ref.python",  # https://github.com/sphinx-doc/sphinx/issues/4961
 ]
 
-autodoc_member_order = "bysource"
+pygments_style = None
 
+
+########################## Extensions' configuration ###########################
+
+# autodoc
+autodoc_member_order = "bysource"
 autodoc_typehints_format = "short"
 python_use_unqualified_type_names = True
 
-graphviz_dot_args = [
-    "-Gfontname=sans-serif",
-    "-Efontname=sans-serif",
-    "-Nfontname=sans-serif",
-]
-graphviz_output_format = "svg"
-
+# extlinks
 extlinks = {
     "github_1a5d2c6": (
         "https://github.com/acconeer/acconeer-python-exploration/tree/"
@@ -44,39 +55,40 @@ extlinks = {
     ),
 }
 
+# graphviz
+graphviz_dot_args = [
+    "-Gfontname=sans-serif",
+    "-Efontname=sans-serif",
+    "-Nfontname=sans-serif",
+]
+graphviz_output_format = "svg"
+
+# linkcheck
+linkcheck_retries = 2
+
+# rediraffe
 rediraffe_redirects = "redirects.txt"
-rediraffe_branch = "origin/master"
+rediraffe_branch = "HEAD~1"
 rediraffe_auto_redirect_perc = 95
 
-source_suffix = ".rst"
+# sphinx tabs
+sphinx_tabs_disable_tab_closing = True
 
-master_doc = "index"
+# spelling
+spelling_suggestion_limit = 7
+spelling_show_suggestions = True
+spelling_show_whole_line = True
+spelling_warning = True
+spelling_word_list_filename = ["spelling_wordlist.txt"]
 
-language = "en"
+############################# HTML Builder Options #############################
 
-exclude_patterns = [
-    "_build",
-    "Thumbs.db",
-    ".DS_Store",
-    "README.md",
-    "how_to_docs.txt",
-]
-
-pygments_style = None
+html_theme = "sphinx_book_theme"
 
 html_favicon = "_static/favicon.png"
-
-html_theme = "pydata_sphinx_theme"
-
-html_css_files = ["css/custom.css"]
-
 html_logo = "_static/logo.svg"
-
-html_sidebars = {
-    "index": [],
-    "disclaimer": [],
-    "**": ["sidebar-nav-bs"],
-}
+html_static_path = ["_static"]
+html_css_files = ["css/custom.css"]
 
 html_theme_options = {
     "external_links": [
@@ -93,32 +105,36 @@ html_theme_options = {
             "name": "Twitter",
             "url": "https://twitter.com/acconeer_ab",
             "icon": "fab fa-twitter",
+            "type": "fontawesome",
         },
         {
             "name": "Instagram",
             "url": "https://instagram.com/acconeerab",
             "icon": "fab fa-instagram",
+            "type": "fontawesome",
+        },
+        {
+            "name": "YouTube",
+            "url": "https://www.youtube.com/acconeer",
+            "icon": "fab fa-youtube",
+            "type": "fontawesome",
+        },
+        {
+            "name": "Innovation Lab",
+            "url": "https://www.acconeer.com/innovation-lab",
+            "icon": "far fa-lightbulb",
+            "type": "fontawesome",
         },
     ],
-    "navbar_center": [
-        "navbar-nav",
-    ],
-    "navbar_end": [
-        "search-field",
-        "navbar-icon-links",
-    ],
-    "navbar_persistent": [],
-    "navigation_with_keys": True,
-    "search_bar_text": "Search...",
-    "footer_start": ["copyright"],
-    "footer_end": ["last-updated"],
 }
 
 html_last_updated_fmt = "%Y-%m-%d"
 
-html_static_path = ["_static"]
 
 htmlhelp_basename = "acconeer-python-exploration-docs"
+
+
+############################ LaTeX Builder Options #############################
 
 latex_elements = {
     "papersize": "a4paper",

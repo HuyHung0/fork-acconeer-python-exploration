@@ -22,8 +22,8 @@ def integrationTestPythonVersionsForBuildScope = [
 @Field
 def integrationTestA121RssVersionsForBuildScope = [
     (BuildScope.SANITY)  : [branch: "master"],
-    (BuildScope.HOURLY)  : [tag: "a121-v1.6.0"],
-    (BuildScope.NIGHTLY) : [branch: "master", tag: "a121-v1.6.0"],
+    (BuildScope.HOURLY)  : [tag: "a121-v1.7.0"],
+    (BuildScope.NIGHTLY) : [branch: "master", tag: "a121-v1.7.0"],
 ]
 
 @Field
@@ -35,14 +35,15 @@ def integrationTestA111RssVersionsForBuildScope = [
 
 @Field
 def modelTestA121RssVersionForBuildScope = [
-    (BuildScope.SANITY)  : [tag: "a121-v1.6.0"],
+    (BuildScope.SANITY)  : [tag: "a121-v1.7.0"],
     (BuildScope.HOURLY)  : [],
     (BuildScope.NIGHTLY) : [],
 ]
 
 String dockerArgs(env_map) {
   return "--hostname ${env_map.NODE_NAME}" +
-         " --mount type=volume,src=cachepip-${env_map.EXECUTOR_NUMBER},dst=/home/jenkins/.cache/pip"
+         " --mount type=volume,src=cachepip-${env_map.EXECUTOR_NUMBER},dst=/home/jenkins/.cache/pip" +
+         " --mount type=volume,src=cacheuv,dst=/home/jenkins/.cache/uv"
 }
 
 def messageOnFailure = true
@@ -121,7 +122,7 @@ try {
 
                 buildDocker(path: 'docker').inside(dockerArgs(env)) {
                     sh 'python3 -V'
-                    sh 'nox -s lint'
+                    sh 'hatch fmt --check'
                 }
             }
         }
@@ -138,8 +139,8 @@ try {
 
                     buildDocker(path: 'docker').inside(dockerArgs(env)) {
                         sh 'python3 -V'
-                        sh 'python3 -m build'
-                        sh 'nox -s docs -- --docs-builders html latexpdf rediraffecheckdiff'
+                        sh 'hatch build'
+                        sh 'hatch run docs:build'
                     }
                     archiveArtifacts artifacts: 'dist/*', allowEmptyArchive: true
                     archiveArtifacts artifacts: 'docs/_build/latex/*.pdf', allowEmptyArchive: true
@@ -156,7 +157,7 @@ try {
                     printNodeInfo()
                     checkoutAndCleanup()
                     buildDocker(path: 'docker').inside(dockerArgs(env)) {
-                        sh '''nox -s "mypy(python='3.8')"'''
+                        sh 'hatch run mypy:check --no-incremental'
                     }
                 }
             }
@@ -182,7 +183,7 @@ try {
                     }
                     stage("Model Regression Tests (rss=${modelTestA121RssVersion})") {
                         buildDocker(path: 'docker').inside(dockerArgs(env)) {
-                            sh '''nox -s test -p 3.8 -- --test-groups model'''
+                            sh 'hatch test -py=3.8 tests/model'
                         }
                     }
                 }
@@ -199,10 +200,8 @@ try {
 
                     buildDocker(path: 'docker').inside(dockerArgs(env)) {
                         isolatedTestPythonVersions.each { v -> sh "python${v} -V" }
-                        List<String> doitTasks = isolatedTestPythonVersions
-                                                    .collect { v -> "test:${v}" }
-
-                        sh "doit -f dodo.py -n ${doitTasks.size()} " + doitTasks.join(' ')
+                        String versionSelection = "-py=" + isolatedTestPythonVersions.join(",")
+                        sh "hatch test ${versionSelection} --parallel tests/unit tests/processing tests/app src/acconeer/exptool"
                     }
                 }
             }
@@ -237,12 +236,8 @@ try {
                     }
                     stage("Run integration tests (py=${integrationTestPythonVersions}, rss=${rssVersionName})") {
                         buildDocker(path: 'docker').inside(dockerArgs(env)) {
-                            integrationTestPythonVersions.each { v -> sh "python${v} -V" }
-
-                            List<String> doitTasks = integrationTestPythonVersions
-                                                            .collect { v -> "integration_test:${v}-a121" }
-
-                            sh "doit -f dodo.py port_strategy=unique -n ${doitTasks.size()} " + doitTasks.join(' ')
+                            String versionSelection = "-py=" + integrationTestPythonVersions.join(",")
+                            sh "hatch test ${versionSelection} tests/integration/a121"
                         }
                     }
                 }
@@ -272,53 +267,8 @@ try {
                     stage("Run integration tests (py=${integrationTestPythonVersions}, rss=${rssVersionName})") {
                         buildDocker(path: 'docker').inside(dockerArgs(env)) {
                             integrationTestPythonVersions.each { v -> sh "python${v} -V" }
-
-                            List<String> doitTasks = integrationTestPythonVersions
-                                                            .collect { v -> "integration_test:${v}-a111" }
-
-                            sh "doit -f dodo.py port_strategy=unique -n ${doitTasks.size()} " + doitTasks.join(' ')
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    parallel_steps["XM112 test (py=${integrationTestPythonVersions}, rss=${integrationTestA111RssVersions})"] = {
-        node('exploration_tool') {
-            ws('workspace/exptool') {
-                integrationTestA111RssVersions.each { rssVersion ->
-                    def rssVersionName = rssVersion.getValue()
-
-                    def dockerImg = null
-                    stage("Setup (rss=${rssVersionName})") {
-                        printNodeInfo()
-                        checkoutAndCleanup()
-
-                        findBuildAndCopyArtifacts(
-                            [
-                                projectName: 'sw-main',
-                                artifactNames: [
-                                    "out/internal_stash_python_libs.tgz",
-                                    "out/internal_stash_binaries_xm112.tgz",
-                                ]
-                            ] << rssVersion // e.g. [branch: 'master'] or [tag: 'a111-vX.Y.Z']
-                        )
-                        sh 'mkdir stash'
-                        sh 'tar -xzf out/internal_stash_python_libs.tgz -C stash'
-                        sh 'tar -xzf out/internal_stash_binaries_xm112.tgz -C stash'
-                        dockerImg = buildDocker(path: 'docker')
-                    }
-                    lock("${env.NODE_NAME}-xm112") {
-                        stage ("Flash (rss=${rssVersionName})") {
-                            sh '(cd stash && python3 python_libs/test_utils/flash.py)'
-                        }
-                        dockerImg.inside(dockerArgs(env) + " --net=host --privileged") {
-                            integrationTestPythonVersions.each { pythonVersion ->
-                                stage("Run integration tests (py=${pythonVersion}, rss=${rssVersionName})") {
-                                    sh "tests/run-a111-xm112-integration-tests.sh ${pythonVersion}"
-                                }
-                            }
+                            String versionSelection = "-py=" + integrationTestPythonVersions.join(",")
+                            sh "hatch test ${versionSelection} tests/integration/a111"
                         }
                     }
                 }
@@ -373,21 +323,11 @@ try {
                             sh "git config user.email 'ai@acconeer.com'"
                             sh "tests/release_branch/release_branch_update.sh -b ${env.BRANCH_NAME} -p ${RELEASE_BRANCHES}"
                         } else if (buildScope == BuildScope.SANITY && currentBuild.currentResult == 'SUCCESS') {
-                            sh "tests/release_branch/release_branch_push.sh -p ${RELEASE_BRANCHES}"
+                            sh "tests/release_branch/release_branch_push.sh -b ${env.BRANCH_NAME} -p ${RELEASE_BRANCHES}"
                         }
                     }
                 }
             }
-        }
-    }
-
-    stage('Report to gerrit') {
-        if (currentBuild.currentResult == 'SUCCESS') {
-            echo "Reporting OK to Gerrit"
-            gerritReview labels: [Verified: 1], message: "Success: ${env.BUILD_URL}, Duration: ${currentBuild.durationString - ' and counting'}"
-        } else {
-            echo "Reporting Fail to Gerrit"
-            gerritReview labels: [Verified: -1], message: "Failed: ${env.BUILD_URL}, Duration: ${currentBuild.durationString - ' and counting'}"
         }
     }
 } catch (exception) {

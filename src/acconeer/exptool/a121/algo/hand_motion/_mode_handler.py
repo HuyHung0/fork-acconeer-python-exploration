@@ -1,4 +1,4 @@
-# Copyright (c) Acconeer AB, 2023
+# Copyright (c) Acconeer AB, 2023-2024
 # All rights reserved
 
 from __future__ import annotations
@@ -9,8 +9,7 @@ from typing import Any, Optional, Tuple, Union
 import attrs
 import h5py
 
-from acconeer.exptool import a121
-from acconeer.exptool.a121._h5_utils import _create_h5_string_dataset
+from acconeer.exptool import a121, opser
 from acconeer.exptool.a121.algo import (
     AlgoConfigBase,
     Controller,
@@ -66,6 +65,9 @@ class ModeHandlerConfig(AlgoConfigBase):
         return cls(**d)
 
 
+opser.register_json_presentable(ModeHandlerConfig)
+
+
 @attrs.frozen(kw_only=True)
 class ModeHandlerResult:
     app_mode: AppMode
@@ -115,7 +117,7 @@ class ModeHandler(Controller[ModeHandlerConfig, ModeHandlerResult]):
         assert mode_handler_config.hand_detection_timeout is not None
         # Convert timeout from seconds to frames.
         self.hand_motion_timeout_duration = int(
-            mode_handler_config.hand_detection_timeout * self.example_app_config.frame_rate
+            round(mode_handler_config.hand_detection_timeout * self.example_app_config.frame_rate)
         )
         self.use_presence_detection = mode_handler_config.use_presence_detection
 
@@ -142,21 +144,20 @@ class ModeHandler(Controller[ModeHandlerConfig, ModeHandlerResult]):
         if _algo_group is not None:
             _record_algo_data(_algo_group, self.sensor_id, self.config)
 
-        self.presence_detector = Detector(
-            client=self.client,
-            sensor_id=self.sensor_id,
-            detector_config=self.presence_config,
-            detector_context=self.presence_detector_context,
-        )
-        self.hand_motion_app = ExampleApp(
-            client=self.client,
-            sensor_id=self.sensor_id,
-            example_app_config=self.example_app_config,
-        )
-
         if self.use_presence_detection:
+            self.presence_detector = Detector(
+                client=self.client,
+                sensor_id=self.sensor_id,
+                detector_config=self.presence_config,
+                detector_context=self.presence_detector_context,
+            )
             self.presence_detector.start()
         else:
+            self.hand_motion_app = ExampleApp(
+                client=self.client,
+                sensor_id=self.sensor_id,
+                example_app_config=self.example_app_config,
+            )
             self.hand_motion_app.start()
 
         self.started = True
@@ -207,16 +208,17 @@ class ModeHandler(Controller[ModeHandlerConfig, ModeHandlerResult]):
             result = ModeHandlerResult(app_mode=current_app_mode, presence_result=app_result)
         elif self.app_mode == AppMode.HANDMOTION:
             assert isinstance(app_result, ExampleAppResult)
-            if app_result.detection_state is not DetectionState.NO_DETECTION:
-                # detection -> reset timer
-                self.hand_motion_timer = 0
-            elif self.hand_motion_timeout_duration < self.hand_motion_timer:
-                # timer has expired -> switch mode
-                self.app_mode = AppMode.PRESENCE
-            else:
-                self.hand_motion_timer += 1
+            if self.use_presence_detection:
+                if app_result.detection_state is not DetectionState.NO_DETECTION:
+                    # detection -> reset timer
+                    self.hand_motion_timer = 0
+                elif self.hand_motion_timeout_duration < self.hand_motion_timer:
+                    # timer has expired -> switch mode
+                    self.app_mode = AppMode.PRESENCE
+                else:
+                    self.hand_motion_timer += 1
             result = ModeHandlerResult(
-                app_mode=self.app_mode,
+                app_mode=current_app_mode,
                 detection_state=app_result.detection_state,
                 example_app_result=app_result,
             )
@@ -278,10 +280,12 @@ def _record_algo_data(
         data=sensor_id,
         track_times=False,
     )
-    _create_h5_string_dataset(algo_group, "mode_handler_config", config.to_json())
+
+    handle_config_group = algo_group.create_group("mode_handler_config")
+    opser.serialize(config, handle_config_group)
 
 
 def _load_algo_data(algo_group: h5py.Group) -> Tuple[int, ModeHandlerConfig]:
     sensor_id = int(algo_group["sensor_id"][()])
-    config = ModeHandlerConfig.from_json(algo_group["mode_handler_config"][()])
+    config = opser.deserialize(algo_group["mode_handler_config"], ModeHandlerConfig)
     return sensor_id, config
