@@ -1,4 +1,4 @@
-# Copyright (c) Acconeer AB, 2022-2023
+# Copyright (c) Acconeer AB, 2022-2024
 # All rights reserved
 
 import time
@@ -12,29 +12,47 @@ from acconeer.exptool.a111._clients.mock.client import MockClient
 from acconeer.exptool.a111._clients.reg.client import SPIClient, UARTClient
 
 
-@pytest.fixture(scope="module")
-def setup(request, port_from_cli):
-    conn_type, *args = request.param
-
-    if conn_type == "spi":
-        client = SPIClient()
-        sensor = 1
-    elif conn_type == "uart":
-        port = args[0] or et.utils.autodetect_serial_port()
-        client = UARTClient(port)
-        sensor = 1
-    elif conn_type == "socket":
-        client = SocketClient(args[0], port=port_from_cli)
-        sensor = int(args[1])
-    elif conn_type == "mock":
-        client = MockClient()
-        sensor = 1
+@pytest.fixture(scope="function")
+def exploration_server_setup(request, worker_tcp_port: int, a111_exploration_server: None):
+    if args := request.config.getoption("--socket"):
+        (ip, sensor) = args
+        client = SocketClient(ip, port=worker_tcp_port)
+        sensor = int(sensor)
     else:
-        pytest.fail()
+        # If nothing is specified through the CLI, assume socket on localhost
+        client = SocketClient("localhost", port=worker_tcp_port)
+        sensor = 1
 
     client.connect()
     yield (client, sensor)
     client.disconnect()
+
+
+@pytest.fixture(scope="module")
+def real_setup(request):
+    if request.config.getoption("--spi"):
+        client = SPIClient()
+        sensor = 1
+    elif port := request.config.getoption("--uart"):
+        client = UARTClient(et.utils.autodetect_serial_port() if port == "auto" else port)
+        sensor = 1
+    elif request.config.getoption("--mock"):
+        client = MockClient()
+        sensor = 1
+    else:
+        pytest.fail("Neither '--spi', '--uart' nor '--mock' was specified")
+
+    client.connect()
+    yield (client, sensor)
+    client.disconnect()
+
+
+@pytest.fixture(
+    scope="function",
+    params=["exploration_server_setup"],
+)
+def setup(request):
+    return request.getfixturevalue(request.param)
 
 
 def test_run_a_host_driven_session(setup):

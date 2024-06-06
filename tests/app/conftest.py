@@ -1,4 +1,4 @@
-# Copyright (c) Acconeer AB, 2023
+# Copyright (c) Acconeer AB, 2023-2024
 # All rights reserved
 from __future__ import annotations
 
@@ -7,23 +7,19 @@ import functools
 import queue
 import typing as t
 from pathlib import Path
-from unittest.mock import Mock
+from time import time
 
 import dirty_equals as de
 import pytest
 
 from acconeer.exptool import a121
+from acconeer.exptool.a121.algo.sparse_iq._plugin import SPARSE_IQ_PLUGIN
 from acconeer.exptool.app.new._enums import PluginGeneration
 from acconeer.exptool.app.new.app_model import PluginSpec
 from acconeer.exptool.app.new.backend import Backend, ClosedTask, Message, Task
 
 
-def _mock_plugin_factory(*args: t.Any, **kwargs: t.Any) -> t.Any:
-    return Mock()
-
-
-def always_return_none(*args: t.Any, **kwargs: t.Any) -> t.Any:
-    return None
+ALWAYS_RETURNS_NONE: t.Callable[[t.Any], None] = {}.get
 
 
 class Tasks:
@@ -32,7 +28,7 @@ class Tasks:
             "connect_client",
             dict(
                 client_factory=functools.partial(a121.Client.open, mock=True),
-                get_connection_warning=always_return_none,
+                get_connection_warning=ALWAYS_RETURNS_NONE,
             ),
         ),
     }
@@ -41,14 +37,14 @@ class Tasks:
             "connect_client",
             dict(
                 client_factory=functools.partial(a121.Client.open, ip_address="some_ip"),
-                get_connection_warning=always_return_none,
+                get_connection_warning=ALWAYS_RETURNS_NONE,
             ),
         ),
     }
     DISCONNECT_CLIENT_TASK: Task = ("disconnect_client", {})
     LOAD_PLUGIN_TASK: Task = (
         "load_plugin",
-        dict(plugin_factory=_mock_plugin_factory, key="key"),
+        dict(plugin_factory=SPARSE_IQ_PLUGIN.create_backend_plugin, key="key"),
     )
     UNLOAD_PLUGIN_TASK: Task = ("unload_plugin", {})
     START_SESSION_TASK: Task = ("start_session", dict(with_recorder=True))
@@ -105,6 +101,7 @@ def assert_messages() -> t.Callable[..., None]:
         not_received: t.Iterable[t.Union[Message, ClosedTask]] = tuple(),
         max_num_messages: int = 10,
         recv_timeout: float = 2.0,
+        timeout: float = 10.0,
     ) -> None:
         """
         Utility function that asserts that
@@ -117,6 +114,7 @@ def assert_messages() -> t.Callable[..., None]:
         not_yet_seen_messages = copy.deepcopy(received)
         received_messages: list[t.Union[Message, ClosedTask]] = []
         message_generator = (backend.recv(recv_timeout) for _ in range(max_num_messages))
+        start_time = time()
         while not_yet_seen_messages != []:
             try:
                 received_message = next(message_generator)
@@ -132,8 +130,17 @@ def assert_messages() -> t.Callable[..., None]:
                     + "\n"
                 )
 
+            if time() - start_time > timeout:
+                raise TimeoutError(f"Did not find the message within time {timeout}s")
+
             if received_message in not_received:
-                raise AssertionError(f"Found message {received_message}")
+                if received_message == Tasks.FAILED_CLOSED_TASK:
+                    assert isinstance(received_message, ClosedTask)
+                    raise AssertionError(
+                        f"Found failed task\n{received_message.traceback_format_exc}"
+                    )
+                else:
+                    raise AssertionError(f"Found message {received_message}")
 
             if received_message in not_yet_seen_messages:
                 not_yet_seen_messages.remove(received_message)

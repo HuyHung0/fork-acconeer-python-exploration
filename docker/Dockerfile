@@ -14,6 +14,7 @@ RUN apt-get update -qq \
         libasan5 \
         libdbus-1-3 \
         libegl1 \
+        libenchant-2-2 \
         libfontconfig1 \
         libgl1-mesa-glx \
         libtsan0 \
@@ -61,5 +62,6 @@ RUN groupadd -g 1000 jenkins \
 USER jenkins
 
 RUN mkdir -p /home/jenkins/.cache/pip
+RUN mkdir -p /home/jenkins/.cache/uv
 
 WORKDIR /home/jenkins

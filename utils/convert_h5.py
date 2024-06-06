@@ -10,7 +10,7 @@ import json
 import os
 import typing as t
 from pathlib import Path
-from typing import Dict, Optional, Tuple, Union, cast
+from typing import Dict, Tuple, Union, cast
 
 import h5py
 import numpy as np
@@ -20,11 +20,16 @@ import pandas as pd
 import acconeer.exptool as et
 import acconeer.exptool.a121.algo.breathing as breathing
 import acconeer.exptool.a121.algo.distance as distance
+import acconeer.exptool.a121.algo.hand_motion as hand_motion
+import acconeer.exptool.a121.algo.parking as parking
 import acconeer.exptool.a121.algo.phase_tracking as phase_tracking
 import acconeer.exptool.a121.algo.presence as presence
+import acconeer.exptool.a121.algo.smart_presence as smart_presence
 import acconeer.exptool.a121.algo.speed as speed
 import acconeer.exptool.a121.algo.surface_velocity as surface_velocity
 import acconeer.exptool.a121.algo.tank_level as tank_level
+import acconeer.exptool.a121.algo.touchless_button as touchless_button
+import acconeer.exptool.a121.algo.vibration as vibration
 import acconeer.exptool.a121.algo.waste_level as waste_level
 from acconeer.exptool import a121
 from acconeer.exptool.a121 import H5Record, _core, algo
@@ -108,11 +113,19 @@ class ConvertToCsvArgumentParser(argparse.ArgumentParser):
 
 class TableConverter:
     @abc.abstractmethod
-    def convert(self, sensor: int) -> npt.NDArray[t.Any]:
+    def convert(self, sensor: int) -> Union[npt.NDArray[t.Any], list[npt.NDArray[t.Any]]]:
         pass
 
     @abc.abstractmethod
     def get_metadata_rows(self, sensor: int) -> list[npt.NDArray[t.Any]]:
+        pass
+
+    @abc.abstractmethod
+    def get_environment(self) -> dict[str, t.Any]:
+        pass
+
+    @abc.abstractmethod
+    def get_configs(self, session_index: int) -> dict[str, t.Any]:
         pass
 
     @abc.abstractmethod
@@ -178,10 +191,30 @@ class A111RecordTableConverter(TableConverter):
 
         return np.array(dest_rows)
 
+    def get_environment(self) -> dict[str, t.Any]:
+        environment_dict = {
+            "RSS version": self._record.rss_version,
+            "acconeer.exptool library version": self._record.lib_version,
+            "Timestamp": self._record.timestamp,
+        }
+        return environment_dict
+
+    def get_configs(self, session_index: int = 0) -> dict[str, t.Any]:
+        session_info = self._record.session_info
+        config_dict = self.parse_config_dump(self._record.sensor_config_dump)
+        processing_config_dump = self._record.processing_config_dump or ""
+        processing_config_dict = self.parse_config_dump(processing_config_dump)
+
+        return {
+            **session_info,
+            **config_dict,
+            **processing_config_dict,
+        }
+
     def print_information(self, verbose: bool = False) -> None:
-        config_dump = self.parse_config_dump(self._record.sensor_config_dump)
+        config = self.get_configs()
         print("=== Session info " + "=" * 43)
-        for k, v in config_dump.items():
+        for k, v in config.items():
             print(f"{k:30} {v} ")
         print("=" * 60)
         print()
@@ -228,7 +261,7 @@ class A111RecordTableConverter(TableConverter):
 
         print("\n")
 
-        environtment_a111 = get_environment(record)
+        environtment_a111 = self.get_environment()
 
         for k, v in environtment_a111.items():
             print("{:.<37} {}".format(k + " ", v))
@@ -247,20 +280,22 @@ class A121RecordTableConverter(TableConverter):
     def __init__(self, record: a121.Record) -> None:
         self._record = record
 
-    def _results_of_sensor_id(self, sensor_id: int) -> list[a121.Result]:
+    def _results_of_sensor_id(self, sensor_id: int, session_index: int = 0) -> list[a121.Result]:
         return [
             ext_result[sensor_id]
-            for ext_result_group in self._record.extended_results
+            for ext_result_group in self._record.session(session_index).extended_results
             for ext_result in ext_result_group
             if sensor_id in ext_result
         ]
 
-    def _unique_sensor_configs_of_sensor_id(self, sensor_id: int) -> list[a121.SensorConfig]:
+    def _unique_sensor_configs_of_sensor_id(
+        self, sensor_id: int, session_index: int = 0
+    ) -> list[a121.SensorConfig]:
         # FIXME: this is not a `set` as SensorConfig is not hash-able
         sensor_configs = [
             sensor_config
             for _, sid, sensor_config in _core.utils.iterate_extended_structure(
-                self._record.session_config.groups
+                self._record.session(session_index).session_config.groups
             )
             if sid == sensor_id
         ]
@@ -271,23 +306,22 @@ class A121RecordTableConverter(TableConverter):
         return unique_sensor_configs
 
     def _unique_metadatas_of_sensor_id(
-        self, sensor_id: int
+        self, sensor_id: int, session_index: int = 0
     ) -> list[a121._core.entities.containers.metadata.Metadata]:
-        extended = self._record.session_config.extended
+        extended = self._record.session(session_index).session_config.extended
         metadatas = [
             metadata
             for _, sid, metadata in _core.utils.iterate_extended_structure(
-                self._record.extended_metadata
+                self._record.session(session_index).extended_metadata
             )
             if sid == sensor_id
         ]
-        unique_metadatas = metadatas if extended else [self._record.metadata]
+        unique_metadatas = (
+            metadatas if extended else [self._record.session(session_index).metadata]
+        )
         return unique_metadatas
 
-    def _get_sparse_iq(
-        self,
-        sensor: int,
-    ) -> npt.NDArray[t.Any]:
+    def _get_sparse_iq(self, sensor: int, session_index: int = 0) -> npt.NDArray[t.Any]:
         """This function handles the case where the sensor at "sensor ID" is configured
         with a single/multiple `SensorConfig(s)`, possibly in multiple groups.
 
@@ -296,8 +330,10 @@ class A121RecordTableConverter(TableConverter):
         """
 
         # Sensor results as a concatenate results of multiple or single configs
-        sensor_results = self._results_of_sensor_id(sensor)
-        num_sensor_configs = len(self._unique_sensor_configs_of_sensor_id(sensor))
+        sensor_results = self._results_of_sensor_id(sensor, session_index=session_index)
+        num_sensor_configs = len(
+            self._unique_sensor_configs_of_sensor_id(sensor, session_index=session_index)
+        )
         rows = []
         row_values = []
 
@@ -316,13 +352,73 @@ class A121RecordTableConverter(TableConverter):
 
         return np.array(rows)
 
-    def convert(self, sensor: int) -> npt.NDArray[t.Any]:
+    def get_environment(self) -> dict[str, t.Any]:
+        environment_dict = {
+            "RSS version": self._record.server_info.rss_version,
+            "Exptool version": self._record.lib_version,
+            "Timestamp": self._record.timestamp,
+            "UUID": self._record.uuid,
+        }
+        for session_index in range(self._record.num_sessions):
+            # Create a Pandas DataFrame from the data
+            environment_dict[f"Number of frames session {session_index}"] = str(
+                self._record.session(session_index).num_frames
+            )
+        return environment_dict
+
+    def get_configs(self, session_index: int = 0) -> dict[str, t.Any]:
+        group_configs = {}
+        subsweep_config_with_index: Dict[str, t.Any] = {}
+        sensor_config_with_index: Dict[str, t.Any] = {}
+        session_config = self._record.session(session_index).session_config
+        # Create DataFrames from configurations
+        for group_id, sensor_id, sensor_config in _core.utils.iterate_extended_structure(
+            session_config.groups
+        ):
+            sensor_config_with_index[f"group_id [{group_id}] sensor_id [{sensor_id}]"] = None
+            frame_rate = "Max" if sensor_config.frame_rate is None else sensor_config.frame_rate
+            sweep_rate = "Max" if sensor_config.sweep_rate is None else sensor_config.sweep_rate
+            group_configs = {
+                "sweep_rate": sweep_rate,
+                "frame_rate": frame_rate,
+            }
+            for key, value in sensor_config.to_dict().items():
+                if key == "subsweeps":
+                    continue  # subsweeps are extended below
+                else:
+                    sensor_config_with_index[f"{key} [{group_id}] [{sensor_id}]"] = value
+
+            for idx, subsweep in enumerate(sensor_config.subsweeps):
+                subsweep_config_with_index[f"SUBSWEEP INDEX [{idx}]"] = None
+                # Later will be converted to multiple subsweeps producing multiple rows in excel
+                for key, value in subsweep.to_dict().items():
+                    if key != "subsweeps":
+                        subsweep_config_with_index[f"{key} [{idx}]"] = value
+
+        update_rate = "Max" if session_config.update_rate is None else session_config.update_rate
+        configs = {
+            "extended": session_config.extended,
+            "update_rate": update_rate,
+        }
+        config_dict = {
+            **configs,
+            **group_configs,
+            **sensor_config_with_index,
+            **subsweep_config_with_index,
+        }
+        return config_dict
+
+    def convert(self, sensor: int) -> list[npt.NDArray[t.Any]]:
         """Converts data of a single sensor
 
         :param sensor: The sensor index
-        :returns: 2D NDArray of cell values.
+        :returns: list of 2D NDArray of cell values from every session.
         """
-        return self._get_sparse_iq(sensor)
+        sparse_iq_list = []
+        # Sensor results as a concatenate results of multiple or single configs
+        for session_index in range(self._record.num_sessions):
+            sparse_iq_list.append(self._get_sparse_iq(sensor, session_index=session_index))
+        return sparse_iq_list
 
     def get_metadata_rows(self, sensor: int) -> list[t.Any]:
         sensor_configs = self._unique_sensor_configs_of_sensor_id(sensor)
@@ -342,55 +438,34 @@ class A121RecordTableConverter(TableConverter):
         return [sweeps_numbers, depths_headers]
 
     def print_information(self, verbose: bool = False) -> None:
-        extended = self._record.session_config.extended
-
-        print("=== Session config " + "=" * 41)
-        print(self._record.session_config)
-
-        if not verbose:
-            print("=" * 60)
-            return
-
-        print("=== Meta data " + "=" * 46)
-        pprint(self._record.extended_metadata if extended else self._record.metadata)
         print("=== Server info " + "=" * 44)
         pprint(self._record.server_info)
         print("=== Client info " + "=" * 44)
         pprint(self._record.client_info)
+        for session_index in range(self._record.num_sessions):
+            extended = self._record.session(session_index).session_config.extended
 
-        environtment_a121 = get_environment(self._record)
+            print("=== Session config " + "=" * 41)
+            print(self._record.session(session_index).session_config)
 
-        for k, v in environtment_a121.items():
-            print("{:.<37} {}".format(k + " ", v))
+            if not verbose:
+                print("=" * 60)
+                return
 
-        print("=" * 60)
+            print("=== Meta data " + "=" * 46)
+            pprint(
+                self._record.session(session_index).extended_metadata
+                if extended
+                else self._record.session(session_index).metadata
+            )
 
+            environtment_a121 = self.get_environment()
+            print("environtment_a121 " + str(environtment_a121))
 
-def get_environment(
-    record: Union[et.a111.recording.Record, a121.Record]
-) -> dict[str, Optional[str]]:
-    if isinstance(record, et.a111.recording.Record):
-        environment_dict = {
-            "RSS version": record.rss_version,
-            "acconeer.exptool library version": record.lib_version,
-            "Timestamp": record.timestamp,
-        }
-        return environment_dict
+            for k, v in environtment_a121.items():
+                print("{:.<37} {}".format(k + " ", v))
 
-    elif isinstance(record, a121.Record):
-        environment_dict = {
-            "RSS version": record.server_info.rss_version,
-            "Exptool version": record.lib_version,
-            "Number of frames": str(record.num_frames),
-            "Timestamp": record.timestamp,
-            "UUID": record.uuid,
-        }
-        return environment_dict
-    else:
-        raise TypeError(
-            f"Passed record ({record}) was of unexpected type."
-            f" actual {type(record)}, expected et.a111.recording.Record or a121.Record"
-        )
+            print("=" * 60)
 
 
 def _check_files(
@@ -445,51 +520,6 @@ def get_default_sensor_id_or_index(namespace: argparse.Namespace, generation: st
         return 1 if generation == "a121" else 0
 
 
-def configs_as_dataframe(session_config: a121.SessionConfig) -> pd.DataFrame:
-    group_configs = {}
-    subsweep_config_with_index: Dict[str, t.Any] = {}
-    sensor_config_with_index: Dict[str, t.Any] = {}
-
-    # Create DataFrames from configurations
-    for group_id, sensor_id, sensor_config in _core.utils.iterate_extended_structure(
-        session_config.groups
-    ):
-        sensor_config_with_index[f"group_id [{group_id}] sensor_id [{sensor_id}]"] = None
-        frame_rate = "Max" if sensor_config.frame_rate is None else sensor_config.frame_rate
-        sweep_rate = "Max" if sensor_config.sweep_rate is None else sensor_config.sweep_rate
-        group_configs = {
-            "sweep_rate": sweep_rate,
-            "frame_rate": frame_rate,
-        }
-        for key, value in sensor_config.to_dict().items():
-            if key == "subsweeps":
-                continue  # subsweeps are extended below
-            else:
-                sensor_config_with_index[f"{key} [{group_id}] [{sensor_id}]"] = value
-
-        for idx, subsweep in enumerate(sensor_config.subsweeps):
-            subsweep_config_with_index[f"SUBSWEEP INDEX [{idx}]"] = None
-            # Later will be converted to multiple subsweeps producing multiple rows in excel
-            for key, value in subsweep.to_dict().items():
-                if key != "subsweeps":
-                    subsweep_config_with_index[f"{key} [{idx}]"] = value
-
-    update_rate = "Max" if session_config.update_rate is None else session_config.update_rate
-    configs = {
-        "extended": session_config.extended,
-        "update_rate": update_rate,
-    }
-
-    return pd.DataFrame(
-        {
-            **configs,
-            **group_configs,
-            **sensor_config_with_index,
-            **subsweep_config_with_index,
-        }.items()
-    )
-
-
 def get_processed_data(h5_file: h5py.File) -> Tuple[pd.DataFrame, pd.DataFrame]:
     app_key = h5_file["algo/key"][()].decode()
     df_app_config = pd.DataFrame()
@@ -498,12 +528,17 @@ def get_processed_data(h5_file: h5py.File) -> Tuple[pd.DataFrame, pd.DataFrame]:
     load_algo_and_client: Dict[str, t.Callable[[h5py.File], Tuple[pd.DataFrame, pd.DataFrame]]] = {
         "breathing": get_processed_data_breathing,
         "distance_detector": get_processed_data_distance,
+        "hand_motion": get_processed_data_hand_motion,
+        "parking": get_processed_data_parking,
         "phase_tracking": get_processed_data_phase_tracking,
         "presence_detector": get_processed_data_presence,
+        "smart_presence": get_processed_data_smart_presence,
         "speed_detector": get_processed_data_speed,
         "surface_velocity": get_processed_data_surface_velocity,
         "waste_level": get_processed_data_waste_level,
         "tank_level": get_processed_data_tank_level,
+        "touchless_button": get_processed_data_touchless_button,
+        "vibration": get_processed_data_vibration,
     }
 
     for key, func in load_algo_and_client.items():
@@ -512,6 +547,61 @@ def get_processed_data(h5_file: h5py.File) -> Tuple[pd.DataFrame, pd.DataFrame]:
             break
 
     return df_processed_data, df_app_config
+
+
+def get_processed_data_parking(h5_file: h5py.File) -> Tuple[pd.DataFrame, pd.DataFrame]:
+    processed_data_list = []
+
+    # Record file extraction
+    record = H5Record(h5_file)
+    num_frames = record.num_frames
+    sensor_id, RefAppConfig, RefAppContext = parking._ref_app._load_algo_data(h5_file["algo"])
+
+    # Create DataFrames from configurations and sensor id
+    df_sensor_id = pd.DataFrame({"sensor_id": sensor_id}.items())
+    df_config = pd.DataFrame([[k, v] for k, v in RefAppConfig.to_dict().items()])
+    df_context = pd.DataFrame([[k, v] for k, v in RefAppContext.to_dict().items()])
+    df_algo_data = pd.concat([df_sensor_id, df_config, df_context], axis=0, ignore_index=True)
+
+    # Client and aggregator preparation
+    client = _ReplayingClient(record, realtime_replay=False)
+    ref_app = parking._ref_app.RefApp(
+        client=client,
+        sensor_id=sensor_id,
+        ref_app_config=RefAppConfig,
+        context=RefAppContext,
+    )
+
+    ref_app.start()
+
+    try:
+        for idx in range(record.num_frames):
+            processed_data = ref_app.get_next()
+
+            # Put the result in row
+            processed_data_row = parking_result_as_row(processed_data=processed_data)
+            processed_data_list.append(processed_data_row)
+
+            # Print progressing time every 5%
+            if (idx % int(0.05 * num_frames)) == 0:
+                print(f"... {idx / num_frames:.0%}")
+
+    except KeyboardInterrupt:
+        print("Conversion aborted")
+    else:
+        print("Processing data is finished. . .")
+
+    ref_app.stop()
+    client.close()
+
+    print("Disconnecting...")
+
+    # Creates DataFrames from processed data and keys
+    keys = ["car_detected", "obstruction_detected"]
+    df_processed_data = pd.DataFrame(
+        {k: v for k, v in zip(keys, [list(row) for row in zip(*processed_data_list)])}
+    )
+    return df_processed_data, df_algo_data
 
 
 def get_processed_data_waste_level(h5_file: h5py.File) -> Tuple[pd.DataFrame, pd.DataFrame]:
@@ -603,6 +693,61 @@ def get_processed_data_breathing(h5_file: h5py.File) -> Tuple[pd.DataFrame, pd.D
     df_processed_data = pd.DataFrame(
         {k: v for k, v in zip(keys, [list(row) for row in zip(*processed_data_list)])}
     )
+    return df_processed_data, df_algo_data
+
+
+def get_processed_data_hand_motion(h5_file: h5py.File) -> Tuple[pd.DataFrame, pd.DataFrame]:
+    processed_data_list = []
+    num_frames = 0
+    sensor_id, ModeHandlerConfig = hand_motion._mode_handler._load_algo_data(h5_file["algo"])
+
+    # Create DataFrames from configurations, sensor id, and detector context
+    df_sensor_id = pd.DataFrame(({"sensor_id": sensor_id}).items())
+    df_config = pd.DataFrame([[k, v] for k, v in ModeHandlerConfig.to_dict().items()])
+
+    # Concatenate along columns
+    df_algo_data = pd.concat([df_sensor_id, df_config], axis=0, ignore_index=True)
+
+    # Client preparation
+    record = H5Record(h5_file)
+    client = _ReplayingClient(record, realtime_replay=False)
+    for session_index in range(record.num_sessions):
+        num_frames = num_frames + record.session(session_index).num_frames
+
+    aggregator = hand_motion.ModeHandler(
+        client=client,
+        sensor_id=sensor_id,
+        mode_handler_config=ModeHandlerConfig,
+    )
+
+    aggregator.start()
+
+    print("Press Ctrl-C to end session")
+    try:
+        for idx in range(num_frames):
+            processed_data = aggregator.get_next()
+
+            # Put the result in row
+            processed_data_row = hand_motion_result_as_row(processed_data=processed_data)
+            processed_data_list.append(processed_data_row)
+
+            # Print progressing time every 5%
+            print(f"... {idx / num_frames:.0%}") if (idx % int(0.05 * num_frames)) == 0 else None
+
+    except KeyboardInterrupt:
+        print("Conversion aborted")
+    else:
+        print("Processing data is finished. . .")
+
+    print("Disconnecting...")
+    client.close()
+
+    # Creates DataFrames from processed data and keys
+    keys = ["app_mode", "detection_state"]
+    df_processed_data = pd.DataFrame(
+        {k: v for k, v in zip(keys, [list(row) for row in zip(*processed_data_list)])}
+    )
+
     return df_processed_data, df_algo_data
 
 
@@ -762,6 +907,170 @@ def get_processed_data_presence(h5_file: h5py.File) -> Tuple[pd.DataFrame, pd.Da
         {k: v for k, v in zip(keys, [list(row) for row in zip(*processed_data_list)])}
     )
 
+    return df_processed_data, df_algo_data
+
+
+def get_processed_data_smart_presence(h5_file: h5py.File) -> Tuple[pd.DataFrame, pd.DataFrame]:
+    processed_data_list = []
+    num_frames = 0
+    sensor_id, RefAppConfig, RefAppContext = smart_presence._ref_app._load_algo_data(
+        h5_file["algo"]
+    )
+
+    # Create DataFrames from configurations, sensor id, and detector context
+    df_sensor_id = pd.DataFrame(({"sensor_id": sensor_id}).items())
+    df_config = pd.DataFrame([[k, v] for k, v in RefAppConfig.to_dict().items()])
+    df_context = pd.DataFrame([[k, v] for k, v in RefAppContext.to_dict().items()])
+
+    # Concatenate along columns
+    df_algo_data = pd.concat([df_sensor_id, df_config, df_context], axis=0, ignore_index=True)
+
+    # Client preparation
+    record = H5Record(h5_file)
+    client = _ReplayingClient(record, realtime_replay=False)
+    for session_index in range(record.num_sessions):
+        num_frames = num_frames + record.session(session_index).num_frames
+    ref_app = smart_presence._ref_app.RefApp(
+        client=client,
+        sensor_id=sensor_id,
+        ref_app_config=RefAppConfig,
+        ref_app_context=RefAppContext,
+    )
+    ref_app.start()
+
+    print("Press Ctrl-C to end session")
+
+    try:
+        for idx in range(num_frames):
+            processed_data = ref_app.get_next()
+
+            # Put the result in row
+            processed_data_row = smart_presence_result_as_row(processed_data=processed_data)
+            processed_data_list.append(processed_data_row)
+
+            # Print progressing time every 5%
+            print(f"... {idx / num_frames:.0%}") if (idx % int(0.05 * num_frames)) == 0 else None
+
+    except KeyboardInterrupt:
+        print("Conversion aborted")
+    else:
+        print("Processing data is finished. . .")
+
+    ref_app.stop()
+
+    print("Disconnecting...")
+    client.close()
+
+    # Creates DataFrames from processed data and keys
+    keys = [
+        "Presence",
+        "Intra_presence_score",
+        "Inter_presence_score",
+    ]
+    df_processed_data = pd.DataFrame(
+        {k: v for k, v in zip(keys, [list(row) for row in zip(*processed_data_list)])}
+    )
+
+    return df_processed_data, df_algo_data
+
+
+def get_processed_data_touchless_button(h5_file: h5py.File) -> Tuple[pd.DataFrame, pd.DataFrame]:
+    processed_data_list = []
+    record = H5Record(h5_file)
+    processor_config = touchless_button._processor._load_algo_data(h5_file["algo"])
+
+    # Create DataFrames from configurations, sensor id, and detector context
+    df_sensor_id = pd.DataFrame({"sensor_id": record.sensor_id}.items())
+    df_config = pd.DataFrame([[k, v] for k, v in processor_config.to_dict().items()])
+    df_algo_data = pd.concat([df_sensor_id, df_config], axis=0, ignore_index=True)
+
+    # Record file extraction
+    num_frames = record.num_frames
+    sensor_config = record.session_config.sensor_config
+    metadata = record.metadata
+
+    processor = touchless_button.Processor(
+        sensor_config=sensor_config,
+        metadata=metadata,
+        processor_config=processor_config,
+    )
+
+    try:
+        for idx, result in enumerate(record.results):
+            processed_data = processor.process(result)
+
+            # Put the result in row
+            processed_data_row = touchless_button_as_row(processed_data=processed_data)
+            processed_data_list.append(processed_data_row)
+
+            # Print progressing time every 5%
+            if (idx % int(0.05 * num_frames)) == 0:
+                print(f"... {idx / num_frames:.0%}")
+
+    except KeyboardInterrupt:
+        print("Conversion aborted")
+    else:
+        print("Processing data is finished. . .")
+
+    print("Disconnecting...")
+
+    # Creates DataFrames from processed data and keys
+    keys = ["close_result", "far_result"]
+    df_processed_data = pd.DataFrame(
+        {k: v for k, v in zip(keys, [list(row) for row in zip(*processed_data_list)])}
+    )
+    return df_processed_data, df_algo_data
+
+
+def get_processed_data_vibration(h5_file: h5py.File) -> Tuple[pd.DataFrame, pd.DataFrame]:
+    record = H5Record(h5_file)
+    processed_data_list = []
+    sensor_id, example_app_config = vibration._load_algo_data(h5_file["algo"])
+
+    # Create DataFrames from configurations and sensor id
+    df_sensor_id = pd.DataFrame(({"sensor_id": sensor_id}).items())
+    df_config = pd.DataFrame([[k, v] for k, v in example_app_config.to_dict().items()])
+
+    # Concatenate along columns
+    df_algo_data = pd.concat([df_sensor_id, df_config], axis=0, ignore_index=True)
+
+    # Client preparation
+    record = H5Record(h5_file)
+    client = _ReplayingClient(record, realtime_replay=False)
+    num_frames = record.num_frames
+
+    example_app = vibration.ExampleApp(
+        client=client,
+        sensor_id=int(sensor_id),
+        example_app_config=example_app_config,
+    )
+    example_app.start()
+
+    try:
+        for idx in range(record.num_frames):
+            processed_data = example_app.get_next()
+
+            # Put the result in row
+            processed_data_row = vibration_as_row(processed_data=processed_data)
+            processed_data_list.append(processed_data_row)
+
+            # Print progressing time every 5%
+            print(f"... {idx / num_frames:.0%}") if (idx % int(0.05 * num_frames)) == 0 else None
+
+    except KeyboardInterrupt:
+        print("Conversion aborted")
+    else:
+        print("Processing data is finished. . .")
+
+    example_app.stop()
+    client.close()
+    print("Disconnecting...")
+
+    # Creates DataFrames from processed data and keys
+    keys = ["max_displacement", "max_sweep_amplitude", "max_displacement_freq"]
+    df_processed_data = pd.DataFrame(
+        {k: v for k, v in zip(keys, [list(row) for row in zip(*processed_data_list)])}
+    )
     return df_processed_data, df_algo_data
 
 
@@ -942,6 +1251,13 @@ def breathing_result_as_row(processed_data: breathing.RefAppResult) -> list[t.An
     return [rate, motion, presence_dist]
 
 
+def parking_result_as_row(processed_data: parking.RefAppResult) -> list[t.Any]:
+    car_detected = processed_data.car_detected
+    obstruction_detected = processed_data.obstruction_detected
+
+    return [car_detected, obstruction_detected]
+
+
 def phase_tracking_as_row(processed_data: phase_tracking.ProcessorResult) -> list[t.Any]:
     peak_loc_m = processed_data.peak_loc_m
     real_iq_history = np.real(processed_data.iq_history[0])
@@ -968,11 +1284,26 @@ def presence_result_as_row(processed_data: presence.DetectorResult) -> list[t.An
     return [presence_detected, intra_presence_score, inter_presence_score, presence_dist]
 
 
+def smart_presence_result_as_row(processed_data: smart_presence.RefAppResult) -> list[t.Any]:
+    presence_detected = "Presence!" if processed_data.presence_detected else "None"
+    intra_presence_score = f"{processed_data.intra_presence_score:.3f}"
+    inter_presence_score = f"{processed_data.inter_presence_score:.3f}"
+
+    return [presence_detected, intra_presence_score, inter_presence_score]
+
+
 def waste_level_as_row(processed_data: waste_level.ProcessorResult) -> list[t.Any]:
     level_percent = f"{processed_data.level_percent}"
     level_m = f"{processed_data.level_m} m"
 
     return [level_percent, level_m]
+
+
+def touchless_button_as_row(processed_data: touchless_button.ProcessorResult) -> list[t.Any]:
+    close_result = False if processed_data.close is None else processed_data.close.detection
+    far_result = False if processed_data.far is None else processed_data.far.detection
+
+    return [close_result, far_result]
 
 
 def distance_result_as_row(
@@ -995,6 +1326,13 @@ def distance_result_as_row(
     return [distances, strengths]
 
 
+def hand_motion_result_as_row(processed_data: hand_motion.ModeHandlerResult) -> list[t.Any]:
+    app_mode = processed_data.app_mode
+    detection_state = processed_data.detection_state
+
+    return [app_mode, detection_state]
+
+
 def speed_result_as_row(processed_data: speed._detector.DetectorResult) -> list[t.Any]:
     speed_per_depth = processed_data.speed_per_depth
     max_speed = processed_data.max_speed
@@ -1008,6 +1346,14 @@ def tank_level_as_row(processed_data: tank_level._ref_app.RefAppResult) -> list[
     peak_status = processed_data.peak_status
 
     return [level, peak_detected, peak_status]
+
+
+def vibration_as_row(processed_data: vibration.ExampleAppResult) -> list[t.Any]:
+    max_displacement = processed_data.max_displacement
+    max_sweep_amplitude = processed_data.max_sweep_amplitude
+    max_displacement_freq = processed_data.max_displacement_freq
+
+    return [max_displacement, max_sweep_amplitude, max_displacement_freq]
 
 
 def main() -> None:
@@ -1028,35 +1374,49 @@ def main() -> None:
     table_converter = TableConverter.from_record(record)
     try:
         sparse_iq_data = table_converter.convert(sensor=sensor)
+        metadata_rows = table_converter.get_metadata_rows(sensor=sensor)
     except Exception as e:
         print(e)
         exit(1)
 
     table_converter.print_information(verbose=args.verbose)
     print()
-
+    dict_excel_file = {}
     if args.sweep_as_column:
-        sparse_iq_data = sparse_iq_data.T
+        if isinstance(sparse_iq_data, np.ndarray):
+            sparse_iq_data = [sparse_iq_data.T]
+        else:
+            sparse_iq_data = [np.transpose(arr) for arr in sparse_iq_data]
+
+    for index in range(len(sparse_iq_data)):
+        dict_excel_file[f"Sparse IQ data session {index}"] = pd.DataFrame(sparse_iq_data[index])
 
     # Create a Pandas DataFrame from the data
-    dict_excel_file = {"Sparse IQ data": pd.DataFrame(sparse_iq_data)}
-
-    # Create a Pandas DataFrame from the environtment
-    record_environtment = get_environment(record)
-    dict_excel_file["Environtment"] = pd.DataFrame(record_environtment.items())
+    dict_excel_file["Metadata"] = pd.DataFrame(metadata_rows)
 
     if isinstance(record, a121.Record):
+        for session_index in range(record.num_sessions):
+            # Add configurations in excel
+            dict_config = table_converter.get_configs(session_index=session_index)
+            dict_excel_file[f"Configurations session {session_index}"] = pd.DataFrame(
+                dict_config.items()
+            )
+    else:
         # Add configurations in excel
-        df_config = configs_as_dataframe(record.session_config)
-        dict_excel_file["Configurations"] = df_config
+        dict_config = table_converter.get_configs(session_index=0)
+        dict_excel_file["Configurations"] = pd.DataFrame(dict_config.items())
+
+    # Create a Pandas DataFrame from the environtment
+    record_environtment = table_converter.get_environment()
+    dict_excel_file["Environtment"] = pd.DataFrame(record_environtment.items())
 
     # Create a Pandas DataFrame from processed data
-    h5_file = h5py.File(str(input_file))
-    df_processed_data, df_app_config = get_processed_data(h5_file)
-    dict_excel_file["Application configurations"] = df_app_config
-    dict_excel_file["Processed data"] = df_processed_data
-
-    h5_file.close()
+    if isinstance(record, a121.Record):
+        h5_file = h5py.File(str(input_file))
+        df_processed_data, df_app_config = get_processed_data(h5_file)
+        dict_excel_file["Application configurations"] = df_app_config
+        dict_excel_file["Processed data"] = df_processed_data
+        h5_file.close()
     # Save the DataFrame to a CSV or excel file
     if output_suffix == ".xlsx":
         output_file = output_stem.with_suffix(output_suffix)

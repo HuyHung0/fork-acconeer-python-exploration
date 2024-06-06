@@ -1127,13 +1127,13 @@ class Detector(Controller[DetectorConfig, Dict[int, DetectorResult]]):
         )
 
         # No neighbours if no close range measurement or transition groups defined.
-        has_neighbouring_subsweep = (
+        has_neighboring_subsweep = (
             MeasurementType.CLOSE_RANGE in plans or len(transition_subgroup_plans) != 0
         )
 
         # Define group plans with max profile
         max_profile_subgroup_plans = cls._get_max_profile_group_plans(
-            config, min_dist_m, has_neighbouring_subsweep, num_remaining_subsweeps
+            config, min_dist_m, has_neighboring_subsweep, num_remaining_subsweeps
         )
 
         far_subgroup_plans = transition_subgroup_plans + max_profile_subgroup_plans
@@ -1232,7 +1232,7 @@ class Detector(Controller[DetectorConfig, Dict[int, DetectorResult]]):
         cls,
         config: DetectorConfig,
         min_dist_m: Dict[a121.Profile, float],
-        has_neighbouring_subsweep: bool,
+        has_neighboring_subsweep: bool,
         num_remaining_subsweeps: int,
     ) -> list[SubsweepGroupPlan]:
         """Define far range group plans with max_profile
@@ -1240,10 +1240,22 @@ class Detector(Controller[DetectorConfig, Dict[int, DetectorResult]]):
         Divide the measurement range from the shortest leakage free distance of max_profile to
         the end point into equidistance segments and assign HWAAS according to the radar equation
         to maintain SNR throughout the sweep.
+
+        Note, special case when max profile is set to 1 and close range leakage cancellation is not
+        used. In this cas, the start of the subsweep is set to the user defined starting point. For
+        other max profiles, this is handled in _get_transition_group_plans.
         """
 
-        if min_dist_m[config.max_profile] < config.end_m:
-            subsweep_start_m = max([config.start_m, min_dist_m[config.max_profile]])
+        if min_dist_m[config.max_profile] < config.end_m or (
+            config.max_profile == a121.Profile.PROFILE_1
+        ):
+            if not config.close_range_leakage_cancellation and (
+                config.max_profile == a121.Profile.PROFILE_1
+            ):
+                subsweep_start_m = config.start_m
+            else:
+                subsweep_start_m = max([config.start_m, min_dist_m[config.max_profile]])
+
             breakpoints_m = np.linspace(
                 subsweep_start_m,
                 config.end_m,
@@ -1255,7 +1267,7 @@ class Detector(Controller[DetectorConfig, Dict[int, DetectorResult]]):
                     config.max_profile,
                     config,
                     breakpoints_m,
-                    (has_neighbouring_subsweep, False),
+                    (has_neighboring_subsweep, False),
                     False,
                 )
             ]
@@ -1371,7 +1383,7 @@ class Detector(Controller[DetectorConfig, Dict[int, DetectorResult]]):
         Add points to segment edges based on their position.
 
         1. Add one margin to each segment for distance filter initialization
-        2. Add an additional margin to segments with neighbouring segments for segment overlap
+        2. Add an additional margin to segments with neighboring segments for segment overlap
         """
 
         margin_p = get_distance_filter_edge_margin(profile, step_length) * step_length
@@ -1494,7 +1506,7 @@ class Detector(Controller[DetectorConfig, Dict[int, DetectorResult]]):
         start_point = int(bpts_m[0] / APPROX_BASE_STEP_LENGTH_M)
         num_steps = (bpts_m[-1] - bpts_m[0]) / (APPROX_BASE_STEP_LENGTH_M)
         bpts = num_steps / (bpts_m[-1] - bpts_m[0]) * (bpts_m - bpts_m[0]) + start_point
-        return [(bpt // step_length) * step_length for bpt in bpts]
+        return [(round(bpt) // step_length) * step_length for bpt in bpts]
 
     @classmethod
     def _update_processor_mode(
