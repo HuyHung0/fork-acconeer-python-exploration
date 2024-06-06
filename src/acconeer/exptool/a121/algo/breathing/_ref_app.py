@@ -113,6 +113,9 @@ class RefAppResult:
     breathing_result: Optional[BreathingProcessorResult] = attrs.field(default=None)
     """Breathing processor result."""
 
+    heart_result:Optional[BreathingProcessorResult] = attrs.field(default=None)
+    """Heart processor result."""
+
 
 class RefApp(Controller[RefAppConfig, RefAppResult]):
     def __init__(

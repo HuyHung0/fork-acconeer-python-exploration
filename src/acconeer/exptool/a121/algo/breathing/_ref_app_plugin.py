@@ -62,6 +62,8 @@ from ._ref_app import (
     get_sensor_config,
 )
 
+from datetime import datetime
+
 
 log = logging.getLogger(__name__)
 
@@ -223,6 +225,7 @@ class PlotPlugin(PgPlotPlugin):
         # Define pens and font.
         blue_color = et.utils.color_cycler(0)
         orange_color = et.utils.color_cycler(1)
+        green_color = et.utils.color_cycler(2)
         brush = et.utils.pg_brush_cycler(0)
         self.blue = dict(
             pen=pg.mkPen(blue_color, width=2),
@@ -238,8 +241,16 @@ class PlotPlugin(PgPlotPlugin):
             symbolBrush=brush,
             symbolPen="k",
         )
+        self.green = dict(
+            pen=pg.mkPen(green_color, width=2),
+            symbol="o",
+            symbolSize=1,
+            symbolBrush=brush,
+            symbolPen="k",
+        )
         self.blue_transparent_pen = pg.mkPen(f"{blue_color}50", width=2)
         self.orange_transparent_pen = pg.mkPen(f"{orange_color}50", width=2)
+        self.green_transparent_pen = pg.mkPen(f"{green_color}50", width=2)
 
         brush_dot = et.utils.pg_brush_cycler(1)
         symbol_dot_kw = dict(symbol="o", symbolSize=10, symbolBrush=brush_dot, symbolPen="k")
@@ -349,11 +360,14 @@ class PlotPlugin(PgPlotPlugin):
         self.heart_rate_plot.setLabel("left", "Heartbeats per min")
         self.heart_rate_plot.setLabel("bottom", "Time (s)")
         self.heart_rate_plot.addItem(pg.PlotDataItem())
+        
         self.heart_rate_curves = []
         self.heart_rate_curves.append(self.heart_rate_plot.plot(**self.blue))
         self.heart_rate_curves.append(
             self.heart_rate_plot.plot(**dict(pen=None, **symbol_dot_kw))
         )
+        self.heart_rate_curves.append(self.heart_rate_plot.plot(**self.green))
+        
         self.smooth_heart_rate = et.utils.SmoothLimits()
 
         self.heart_rate_plot_legend = pg.LegendItem(offset=(0.0, 0.5))
@@ -362,6 +376,9 @@ class PlotPlugin(PgPlotPlugin):
         self.heart_rate_plot_legend.addItem(
             self.heart_rate_curves[1], "Heartbeat rate(embedded output)"
         )
+        self.heart_rate_plot_legend.addItem(
+            self.heart_rate_curves[2], "Fingertip rate"
+        )
         self.heart_rate_plot_legend.hide()
 
         self.heart_rate_text_item = pg.TextItem(
@@ -369,9 +386,15 @@ class PlotPlugin(PgPlotPlugin):
             anchor=(0.5, 0),
             color=pg.mkColor(0xFF, 0xFF, 0xFF, 200),
         )
+        self.fingertip_rate_text_item = pg.TextItem(
+            fill=pg.mkColor(0xFF, 0x7F, 0x0E, 200),
+            anchor=(0.5, 0),
+            color=pg.mkColor(0xFF, 0xFF, 0xFF, 200),
+        )
         self.heart_rate_text_item.setFont(font)
         self.heart_rate_text_item.hide()
-        self.heart_rate_plot.addItem(self.breathing_rate_text_item)
+        self.heart_rate_plot.addItem(self.heart_rate_text_item)
+        self.heart_rate_plot.addItem(self.fingertip_rate_text_item)
 
     def draw_plot_job(self, *, ref_app_result: RefAppResult) -> None:
         app_state = ref_app_result.app_state
@@ -420,11 +443,16 @@ class PlotPlugin(PgPlotPlugin):
             psd = breathing_result.psd
             frequencies = breathing_result.frequencies
             time_vector = breathing_result.time_vector
+            
             all_breathing_rate_history = breathing_result.all_breathing_rate_history
             breathing_rate_history = breathing_result.breathing_rate_history
+            
             all_heart_rate_history = breathing_result.all_heart_rate_history
             heart_rate_history = breathing_result.heart_rate_history
 
+            all_fingertip_rate_history = breathing_result.all_fingertip_rate_history
+            fingertip_rate_history = breathing_result.fingertip_rate_history
+            
             self.time_series_curve.setData(
                 time_vector[-breathing_motion.shape[0] :], breathing_motion
             )
@@ -448,10 +476,14 @@ class PlotPlugin(PgPlotPlugin):
 
             if not np.all(np.isnan(all_heart_rate_history)):
                 self.heart_rate_curves[0].setData(time_vector, all_heart_rate_history)
+                self.heart_rate_curves[2].setData(time_vector, all_fingertip_rate_history)
+
                 lims = self.smooth_heart_rate.update(all_heart_rate_history) #check. missing something?
-                self.heart_rate_plot.setYRange(50, 120)
+                # self.heart_rate_plot.setYRange(lims[0] - 3, lims[1] + 3)
+                self.heart_rate_plot.setYRange(0, 120)
                 self.heart_rate_plot_legend.show()
 
+                
             if not np.all(np.isnan(breathing_rate_history)):
                 self.breathing_rate_curves[1].setData(time_vector, breathing_rate_history)
 
@@ -464,7 +496,11 @@ class PlotPlugin(PgPlotPlugin):
 
             if not np.isnan(heart_rate_history[-1]):
                 self.displayed_heart_rate = "{:.1f}".format(heart_rate_history[-1]) #check
+                print(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}: Displayed heart rate: {self.displayed_heart_rate}")
                 self.heart_rate_text_item.show()
+
+            if not np.isnan(fingertip_rate_history[-1]):
+                self.displayed_fingertip_rate = "{:.1f}".format(fingertip_rate_history[-1])
 
         else:
             self.time_series_plot.setYRange(0, 1)
@@ -529,6 +565,51 @@ class PlotPlugin(PgPlotPlugin):
         self.time_series_text_item.setPos(text_x_pos, text_y_pos)
         self.time_series_text_item.setHtml(time_series_text)
 
+        # Heart text
+        if app_state == AppState.ESTIMATE_BREATHING_RATE:
+            if (
+                ref_app_result.breathing_result is not None
+                and ref_app_result.breathing_result.breathing_rate is None
+            ):
+                time_series_text2 = "Initializing heart detection"
+            elif self.displayed_heart_rate is not None:
+                time_series_text2 = "Heart rate: " + self.displayed_heart_rate + " bpm"
+                print(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}: {time_series_text2}")
+
+        else:
+            time_series_text2 = "Waiting for distance"
+
+        text_y_pos2 = self.time_series_plot.getAxis("left").range[1] * 0.95
+        text_x_pos2 = (
+            self.time_series_plot.getAxis("bottom").range[1]
+            + self.time_series_plot.getAxis("bottom").range[0]
+        ) / 2.0
+        self.time_series_text_item.setPos(text_x_pos2, text_y_pos2)
+        self.time_series_text_item.setHtml(time_series_text2)
+
+        # Fingertip text
+        if app_state == AppState.ESTIMATE_BREATHING_RATE:
+            if (
+                ref_app_result.breathing_result is not None
+                and ref_app_result.breathing_result.breathing_rate is None
+            ):
+                time_series_text3 = "Initializing fingertip detection"
+            elif self.displayed_heart_rate is not None:
+                time_series_text3 = "Fingertip rate: " + self.displayed_fingertip_rate + " bpm"
+                print(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}: {time_series_text3}")
+
+        else:
+            time_series_text2 = "Waiting for distance"
+
+        text_y_pos3 = self.time_series_plot.getAxis("left").range[1] * 0.05
+        text_x_pos3 = (
+            self.time_series_plot.getAxis("bottom").range[1]
+            + self.time_series_plot.getAxis("bottom").range[0]
+        ) / 2.0
+        self.time_series_text_item.setPos(text_x_pos3, text_y_pos3)
+        self.time_series_text_item.setHtml(time_series_text3)
+        
+
         if self.displayed_breathing_rate is not None:
             text_y_pos = self.breathing_rate_plot.getAxis("left").range[1] * 0.95
             text_x_pos = time_vector[0]
@@ -537,11 +618,15 @@ class PlotPlugin(PgPlotPlugin):
             self.breathing_rate_text_item.setHtml(self.displayed_breathing_rate + " bpm")
 
         if self.displayed_heart_rate is not None:
-            text_y_pos = self.heart_rate_plot.getAxis("left").range[1] * 0.95
-            text_x_pos = time_vector[0]
+            text_y_pos2 = self.heart_rate_plot.getAxis("left").range[1] * 0.95
+            text_x_pos2 = time_vector[0]
 
-            self.heart_rate_text_item.setPos(text_x_pos, text_y_pos)
+            self.heart_rate_text_item.setPos(text_x_pos2, text_y_pos2)
             self.heart_rate_text_item.setHtml(self.displayed_heart_rate + " bpm")
+
+            self.fingertip_rate_text_item.setPos(text_x_pos3, text_y_pos3)
+            self.fingertip_rate_text_item.setHtml(self.displayed_fingertip_rate + " bpm")
+            
         
 
 

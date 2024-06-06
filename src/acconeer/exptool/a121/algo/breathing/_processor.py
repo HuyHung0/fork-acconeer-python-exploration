@@ -25,6 +25,10 @@ from acconeer.exptool.a121.algo.presence import Processor as PresenceProcessor
 from acconeer.exptool.a121.algo.presence import ProcessorConfig as PresenceProcessorConfig
 from acconeer.exptool.a121.algo.presence import ProcessorResult as PresenceProcessorResult
 
+import pytesseract
+import mss
+import cv2
+import pytesseract
 
 class AppState(AlgoParamEnum):
     """Breathing app state."""
@@ -85,10 +89,15 @@ class BreathingProcessorExtraResult:
     frequencies: npt.NDArray[np.float_] = attrs.field(eq=attrs_ndarray_isclose)
     breathing_motion: npt.NDArray[np.float_] = attrs.field(eq=attrs_ndarray_isclose)
     time_vector: npt.NDArray[np.float_] = attrs.field(eq=attrs_ndarray_isclose)
+
     breathing_rate_history: npt.NDArray[np.float_] = attrs.field(eq=attrs_ndarray_isclose)
     all_breathing_rate_history: npt.NDArray[np.float_] = attrs.field(eq=attrs_ndarray_isclose)
+
     heart_rate_history: npt.NDArray[np.float_] = attrs.field(eq=attrs_ndarray_isclose)
     all_heart_rate_history: npt.NDArray[np.float_] = attrs.field(eq=attrs_ndarray_isclose)
+
+    fingertip_rate_history: npt.NDArray[np.float_] = attrs.field(eq=attrs_ndarray_isclose)
+    all_fingertip_rate_history: npt.NDArray[np.float_] = attrs.field(eq=attrs_ndarray_isclose)
 
 
 @attrs.mutable(kw_only=True)
@@ -98,6 +107,9 @@ class BreathingProcessorResult:
 
     heart_rate: Optional[float] = attrs.field(default=None)
     """Estimated heart rate. Beats per minute."""
+
+    fingertip_rate: Optional[float] = attrs.field(default=None)
+    """Estimated fingertip rate. Beats per minute."""
 
     extra_result: BreathingProcessorExtraResult
     """Extra result, only used for visualization."""
@@ -109,6 +121,22 @@ class BreathingProcessor(ProcessorBase[BreathingProcessorResult]):
     SECONDS_IN_MINUTE: float = 60.0
     HISTORY_S = SECONDS_IN_MINUTE * 2.0
 
+    ROI = (1613, 316, 242, 178)
+
+
+    sct = mss.mss()
+
+    # get info of main monitor (number 1)
+    monitor_number = 1
+    mon = sct.monitors[monitor_number]
+    selected_monitor = {
+    "top": mon["top"],
+    "left": mon["left"],
+    "width": mon["width"],
+    "height": mon["height"],
+    "mon": monitor_number,
+    }
+    
     # Type declarations
     start_point: int
     end_point: int
@@ -121,6 +149,9 @@ class BreathingProcessor(ProcessorBase[BreathingProcessorResult]):
     all_breathing_rate_history: npt.NDArray[np.float_]
     heart_rate_history: npt.NDArray[np.float_]
     all_heart_rate_history: npt.NDArray[np.float_]
+
+    fingertip_rate_history: npt.NDArray[np.float_]
+    all_fingertip_rate_history: npt.NDArray[np.float_]
 
     start_time: float
     init_counter: int
@@ -263,6 +294,19 @@ class BreathingProcessor(ProcessorBase[BreathingProcessorResult]):
         else:
             primary_heart_rate_freq = None
 
+
+        screenshot = self.sct.grab(self.selected_monitor)
+        # Convert screenshot to a format OpenCV can handle
+        frame = cv2.cvtColor(np.array(screenshot), cv2.COLOR_RGB2BGR)
+        # Extract the region of interest (ROI) from the screenshot
+        x, y, w, h = self.ROI
+        region = frame[y:y+h, x:x+w]
+        fingertip_rate_text = pytesseract.image_to_string(region, config='--psm 7 -c tessedit_char_whitelist=0123456789')
+        try:
+            primary_fingertip_rate = int(fingertip_rate_text)
+        except ValueError:
+            primary_fingertip_rate = None
+        
         # Shift breathing rate history and add latest estimate.
         self.all_breathing_rate_history = np.roll(self.all_breathing_rate_history, shift=-1)
         self.all_breathing_rate_history[-1] = estimated_breathing_rate
@@ -273,14 +317,21 @@ class BreathingProcessor(ProcessorBase[BreathingProcessorResult]):
         self.all_heart_rate_history[-1] = primary_heart_rate_freq
         self.heart_rate_history = np.roll(self.heart_rate_history, shift=-1)
 
+        # Shift fingertip rate history and add latest estimate.
+        self.all_fingertip_rate_history = np.roll(self.all_fingertip_rate_history, shift=-1)
+        self.all_fingertip_rate_history[-1] = primary_fingertip_rate
+        self.fingertip_rate_history = np.roll(self.fingertip_rate_history, shift=-1)
+        
         # Report breathing rate if enough time has elapsed since last estimate.
         if self.time_series_length - self.analysis_overlap <= self.point_counter:
             self.breathing_rate_history[-1] = estimated_breathing_rate
             self.heart_rate_history[-1] = primary_heart_rate_freq
+            self.fingertip_rate_history[-1] = primary_fingertip_rate
             self.point_counter = 0
         else:
             self.breathing_rate_history[-1] = np.nan
             self.heart_rate_history[-1] = np.nan
+            self.fingertip_rate_history[-1] = np.nan
             self.point_counter += 1
 
         # Prepare extra result, used for plotting.
@@ -289,14 +340,19 @@ class BreathingProcessor(ProcessorBase[BreathingProcessorResult]):
             frequencies=self.frequencies,
             breathing_motion=self.breathing_motion_buffer[:, self.center_distance_idx],
             time_vector=self.time_vector,
-            all_breathing_rate_history=self.all_breathing_rate_history,
+            
             breathing_rate_history=self.breathing_rate_history,
+            all_breathing_rate_history=self.all_breathing_rate_history,
+            
             heart_rate_history=self.heart_rate_history,
             all_heart_rate_history=self.all_heart_rate_history,
+            
+            fingertip_rate_history=self.fingertip_rate_history,
+            all_fingertip_rate_history=self.all_fingertip_rate_history,
         )
 
         return BreathingProcessorResult(
-            breathing_rate=estimated_breathing_rate, heart_rate=primary_heart_rate_freq, extra_result=extra_result
+            breathing_rate=estimated_breathing_rate, heart_rate=primary_heart_rate_freq, fingertip_rate=primary_fingertip_rate ,extra_result=extra_result
         )
 
     def reinitialize_processor(self, start_point: int, end_point: int) -> None:
@@ -340,6 +396,13 @@ class BreathingProcessor(ProcessorBase[BreathingProcessorResult]):
             shape=int(self.frame_rate * self.HISTORY_S), fill_value=np.nan
         )
         self.all_heart_rate_history = np.full(
+            shape=int(self.frame_rate * self.HISTORY_S), fill_value=np.nan
+        )
+
+        self.fingertip_rate_history = np.full(
+            shape=int(self.frame_rate * self.HISTORY_S), fill_value=np.nan
+        )
+        self.all_fingertip_rate_history = np.full(
             shape=int(self.frame_rate * self.HISTORY_S), fill_value=np.nan
         )
 
