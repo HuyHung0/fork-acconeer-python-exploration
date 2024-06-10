@@ -371,7 +371,7 @@ class PlotPlugin(PgPlotPlugin):
         )
         self.heart_rate_text_item.setFont(font)
         self.heart_rate_text_item.hide()
-        self.heart_rate_plot.addItem(self.breathing_rate_text_item)
+        self.heart_rate_plot.addItem(self.heart_rate_text_item)
 
     def draw_plot_job(self, *, ref_app_result: RefAppResult) -> None:
         app_state = ref_app_result.app_state
